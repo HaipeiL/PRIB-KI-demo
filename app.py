@@ -331,6 +331,7 @@ if enable_3d and PLOTLY_OK:
             marker=dict(color=colors, symbol=symbols, size=sizes, opacity=0.92, line=dict(width=0)),
             text=hover,
             hoverinfo="text",
+            customdata=np.column_stack([scored["id"].values]),
         )
     )
     fig3d.update_layout(
@@ -343,7 +344,21 @@ if enable_3d and PLOTLY_OK:
         height=600,
         title="3D portfolio map (green→red = accepted intensity; gray X = filtered out)"
     )
-    st.plotly_chart(fig3d, use_container_width=True)
+    event = st.plotly_chart(
+    fig3d,
+    use_container_width=True,
+    on_select="rerun",
+    selection_mode="points",
+)
+
+    # If a point is selected, store its ID
+    try:
+        if event and event.selection and event.selection.points:
+            # We put id into customdata[0] below; adjust if your customdata is different
+            selected_id = event.selection.points[0]["customdata"][0]
+            st.session_state["selected_id"] = selected_id
+    except Exception:
+        pass
 else:
     fig = plt.figure(figsize=(9, 5))
     ax = plt.gca()
@@ -458,9 +473,35 @@ st.divider()
 
 # Single-candidate radar (kept)
 st.markdown("### Single-candidate explainability (6 sub-metrics)")
-pick_default = scored.sort_values("overall", ascending=False)["id"].iloc[0]
-pick = st.selectbox("Select candidate", scored["id"].tolist(), index=scored["id"].tolist().index(pick_default))
+
+# pick default: worst overall
+ids = scored["id"].tolist()
+
+# default: use selected from portfolio if exists; else worst overall
+fallback_id = scored.sort_values("overall", ascending=False)["id"].iloc[0]
+default_id = st.session_state.get("selected_id", fallback_id)
+
+# find index safely
+default_idx = ids.index(default_id) if default_id in ids else 0
+
+# (optional) anchor
+st.markdown("<div id='radar'></div>", unsafe_allow_html=True)
+
+pick = st.selectbox("Select candidate", ids, index=default_idx)
+
+# show a small indicator if selection came from portfolio
+if "selected_id" in st.session_state:
+    st.caption(f"Selected from portfolio: **{st.session_state['selected_id']}**")
+    
 row = scored[scored["id"] == pick].iloc[0]
+
+# --- pull the original sequence (from input df)
+seq_map = dict(zip(df["id"], df["sequence"]))
+seq = seq_map.get(pick, "")
+seq_len = len(seq)
+
+# --- basic inferred MW from scored table if present 
+mw_kda = float(row["mw_kda"]) if "mw_kda" in row.index else float("nan")
 
 metrics6 = [
     ("Self-assoc", "agg_self_association"),
@@ -474,41 +515,151 @@ labels = [m[0] for m in metrics6]
 keys = [m[1] for m in metrics6]
 
 cand_vals = scored.loc[scored["id"] == pick, keys].iloc[0].values.astype(float)
+
 mean_vals = scored[keys].mean().values.astype(float)
 q25 = scored[keys].quantile(0.25).values.astype(float)
 q75 = scored[keys].quantile(0.75).values.astype(float)
 
-def radar(ax, labels, values, color_alpha=0.15, linestyle="-", linewidth=2):
-    N = len(labels)
-    angles = np.linspace(0, 2*np.pi, N, endpoint=False)
-    angles = np.concatenate([angles, angles[:1]])
-    vals = np.concatenate([values, values[:1]])
-    ax.plot(angles, vals, linestyle=linestyle, linewidth=linewidth)
-    ax.fill(angles, vals, alpha=color_alpha)
-    ax.set_thetagrids(np.degrees(angles[:-1]), labels, fontsize=9)
-    ax.set_ylim(0, 100)
+# -----------------------------
+# Layout: left info + right radar
+# -----------------------------
+left, right = st.columns([1.05, 1.2], gap="large")
 
-r1, r2 = st.columns([1, 1.2], gap="large")
-with r1:
-    st.write(f"**{pick}** | status **{row['status']}** | overall **{row['overall']}** | effort **{row['wetlab_effort_index']}**")
-with r2:
-    fig = plt.figure(figsize=(7, 5.6))
-    ax = plt.subplot(111, polar=True)
+with left:
+    st.markdown("#### Candidate overview")
 
+    # compact key KPIs
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Status", str(row.get("status", "")))
+    k2.metric("Overall", f"{float(row['overall']):.1f}")
+    k3.metric("Effort", f"{float(row['wetlab_effort_index']):.1f}")
+
+    k4, k5, k6 = st.columns(3)
+    k4.metric("Agg", f"{float(row['Aggregation']):.1f}")
+    k5.metric("Scale", f"{float(row['ScaleUpSensitivity']):.1f}")
+    k6.metric("Stab", f"{float(row['Stability']):.1f}")
+
+    # extra basic info
+    b1, b2, b3 = st.columns(3)
+    b1.metric("Seq length", f"{seq_len}")
+    if np.isnan(mw_kda):
+        b2.metric("MW (kDa)", "—")
+    else:
+        b2.metric("MW (kDa)", f"{mw_kda:.2f}")
+
+    b3.metric("Critical", "Yes" if bool(row.get("critical_subrisk", False)) else "No")
+
+    # show sub-metrics table (more technical)
+    st.markdown("#### 6-metric signals")
+    df_view = pd.DataFrame({
+        "Metric": labels,
+        "Candidate": np.round(cand_vals, 1),
+        "Batch mean": np.round(mean_vals, 1),
+        "IQR25": np.round(q25, 1),
+        "IQR75": np.round(q75, 1),
+    })
+    st.dataframe(df_view, use_container_width=True, hide_index=True)
+
+
+with right:
+    st.markdown("#### Risk radar (candidate vs batch)")
+
+    # --- Radar plot (dark-friendly, professional)
     N = len(labels)
     angles = np.linspace(0, 2*np.pi, N, endpoint=False)
     angles_c = np.concatenate([angles, angles[:1]])
-    q25_c = np.concatenate([q25, q25[:1]])
-    q75_c = np.concatenate([q75, q75[:1]])
 
-    ax.fill_between(angles_c, q25_c, q75_c, alpha=0.18)
-    radar(ax, labels, mean_vals, color_alpha=0.0, linestyle="--", linewidth=2)
-    radar(ax, labels, cand_vals, color_alpha=0.12, linestyle="-", linewidth=2.6)
+    def close(v):
+        return np.concatenate([v, v[:1]])
 
-    ax.set_title("Candidate (solid) vs mean (dashed) with IQR band", fontsize=11)
+    fig = plt.figure(figsize=(7.2, 5.9))
+    fig.patch.set_alpha(0.0)  # transparent canvas
+    ax = plt.subplot(111, polar=True)
+    ax.set_facecolor((0, 0, 0, 0))  # transparent
+
+    # soft grid / spines for dark background
+    for spine in ax.spines.values():
+        spine.set_color((1, 1, 1, 0.20))
+    ax.grid(color=(1, 1, 1, 0.16))
+    ax.tick_params(colors=(1, 1, 1, 0.78))
+    ax.set_thetagrids(np.degrees(angles), labels, fontsize=10, color=(1, 1, 1, 0.90))
+    ax.set_ylim(0, 100)
+
+    # IQR band (subtle)
+    ax.fill_between(
+        angles_c,
+        close(q25),
+        close(q75),
+        color=(0.85, 0.90, 1.00, 0.10),
+        alpha=0.25
+    )
+
+    # mean (dashed, cool tone)
+    ax.plot(
+        angles_c, close(mean_vals),
+        linestyle="--",
+        linewidth=2.0,
+        color=(0.75, 0.82, 1.00, 0.65)
+    )
+
+    # candidate (primary accent)
+    ax.plot(
+        angles_c, close(cand_vals),
+        linestyle="-",
+        linewidth=2.8,
+        color=(0.40, 0.85, 0.95, 0.95)
+    )
+    ax.fill(
+        angles_c, close(cand_vals),
+        color=(0.40, 0.85, 0.95, 0.15),
+        alpha=0.22
+    )
+
+    # warning badge if high risk
+    vmax = float(np.max(cand_vals))
+    warn_threshold = 80.0
+    if vmax >= warn_threshold:
+        idx = int(np.argmax(cand_vals))
+        ax.scatter(
+            [angles[idx]],
+            [cand_vals[idx]],
+            s=90,
+            marker="^",
+            color=(1.0, 0.35, 0.35, 0.95),
+            edgecolors=(1, 1, 1, 0.35),
+            linewidths=0.8
+        )
+        ax.text(
+            0.02, 1.06,
+            "⚠ High-risk signal",
+            transform=ax.transAxes,
+            color=(1.0, 0.40, 0.40, 0.95),
+            fontsize=12,
+            fontweight="bold"
+        )
+
+    ax.set_title("Candidate (solid) vs batch mean (dashed) + IQR band", fontsize=12, color=(1, 1, 1, 0.90), pad=14)
     st.pyplot(fig, use_container_width=True)
 
+    # --- Amino-acid sequence (direct display)
+    st.markdown("#### Amino-acid sequence")
+
+    if seq:
+        st.code(
+            seq,
+            language="text"
+        )
+        st.download_button(
+            "Download FASTA",
+            data=f">{pick}\n{seq}\n",
+            file_name=f"{pick}.fasta",
+            mime="text/plain"
+        )
+    else:
+        st.caption("Sequence not available in input dataset.")
+
+
 st.caption(
-    "This demonstrator provides early risk signals aligned with industrial developability dimensions. "
-    "It supports prioritization and resource allocation rather than claiming final experimental truth."
+    "This panel provides interpretable early signals aligned with aggregation, scale-up sensitivity, and stability risks. "
+    "It supports prioritization and resource allocation (not a substitute for experimental validation)."
 )

@@ -426,6 +426,9 @@ def score_candidates(
         "id": X["id"].values,
         "length": X["length"].values,
         "mw_kda": X["mw_kda"].values,
+        "pi": X["pi"].values,
+        "gravy": X["gravy"].values,
+        "charge_7p4": X["charge_7p4"].values,
     })
 
     # Predict raw sub-scores via AI models
@@ -533,6 +536,8 @@ def batch_statistics(scored: pd.DataFrame) -> Dict[str, object]:
     stats["mw_kda_mean"] = float(np.nanmean(scored["mw_kda"].values))
     stats["mw_kda_median"] = float(np.nanmedian(scored["mw_kda"].values))
 
+    stats["pi_median"] = float(np.nanmedian(scored["pi"].values))
+
     stats["overall_mean"] = float(np.nanmean(scored["overall"].values))
     stats["overall_median"] = float(np.nanmedian(scored["overall"].values))
 
@@ -542,6 +547,10 @@ def batch_statistics(scored: pd.DataFrame) -> Dict[str, object]:
     # Distributions (for plotting)
     stats["dist_overall"] = scored["overall"].values.astype(float)
     stats["dist_mw_kda"] = scored["mw_kda"].values.astype(float)
+    stats["dist_pi"] = scored["pi"].values.astype(float)
+    stats["dist_gravy"] = scored["gravy"].values.astype(float)
+    stats["dist_charge"] = scored["charge_7p4"].values.astype(float)
+    
     stats["dist_effort"] = scored["wetlab_effort_index"].values.astype(float)
 
     return stats

@@ -372,19 +372,11 @@ with st.sidebar:
         r1.metric("N", int(stats["n"]))
         r2.metric("Effort med.", f"{stats['effort_median']:.1f}")
 
-        pi_median = float(np.nanmedian(X["pi"].values))
-
         r3, r4 = st.columns(2)
         r3.metric("MW med.", f"{stats['mw_kda_median']:.2f}")
-        r4.metric("pI med.", f"{pi_median:.2f}")
+        r4.metric("pI med.", f"{stats['pi_median']:.2f}")
 
-        
-
-        pi_array = X["pi"].values.astype(float)
-        gravy_array = X["gravy"].values.astype(float)
-        charge_array = X["charge_7p4"].values.astype(float)
-
-        fig = plot_protein_overview_sidebar_kde(stats["dist_mw_kda"], pi_array, gravy_array, charge_array, bins=16)
+        fig = plot_protein_overview_sidebar_kde(stats["dist_mw_kda"], stats["dist_pi"], stats["dist_gravy"], stats["dist_charge"], bins=16)
         st.pyplot(fig, use_container_width=True)
 
         st.caption("Reference only. Core decision is driven by risk axes + effort gating.")
@@ -747,14 +739,7 @@ with right:
             edgecolors=(1, 1, 1, 0.35),
             linewidths=0.8
         )
-        ax.text(
-            0.02, 1.06,
-            "⚠ High-risk signal",
-            transform=ax.transAxes,
-            color=(1.0, 0.40, 0.40, 0.95),
-            fontsize=12,
-            fontweight="bold"
-        )
+
 
     ax.set_title("Candidate (solid) vs batch mean (dashed) + IQR band", fontsize=12, color=(1, 1, 1, 0.90), pad=14)
     st.pyplot(fig, use_container_width=True)

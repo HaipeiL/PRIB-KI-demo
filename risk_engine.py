@@ -34,6 +34,95 @@ AA_MASS_DA = {
 }
 WATER_DA = 18.015  # for peptide bond correction (rough)
 
+# Kyte-Doolittle hydropathy scale (common)
+KD = {
+    "A": 1.8,  "C": 2.5,  "D": -3.5, "E": -3.5, "F": 2.8,
+    "G": -0.4, "H": -3.2, "I": 4.5,  "K": -3.9, "L": 3.8,
+    "M": 1.9,  "N": -3.5, "P": -1.6, "Q": -3.5, "R": -4.5,
+    "S": -0.8, "T": -0.7, "V": 4.2,  "W": -0.9, "Y": -1.3
+}
+
+# pKa values (rough, widely used approximations)
+PKA = {
+    "Cterm": 3.1,
+    "Nterm": 8.0,
+    "C": 8.3,
+    "D": 3.9,
+    "E": 4.3,
+    "H": 6.0,
+    "K": 10.5,
+    "R": 12.5,
+    "Y": 10.1,
+}
+
+def gravy(seq: str) -> float:
+    s = seq.strip().upper()
+    vals = [KD[a] for a in s if a in KD]
+    return float(np.mean(vals)) if vals else float("nan")
+
+
+def net_charge_at_ph(seq: str, ph: float = 7.4) -> float:
+    """
+    Net charge at given pH using Henderson–Hasselbalch with rough pKa values.
+    This is an approximation but good enough for overview plots.
+    """
+    s = seq.strip().upper()
+    if not s:
+        return float("nan")
+
+    # counts of ionizable side chains
+    nD = s.count("D")
+    nE = s.count("E")
+    nC = s.count("C")
+    nY = s.count("Y")
+    nH = s.count("H")
+    nK = s.count("K")
+    nR = s.count("R")
+
+    # positive groups: N-terminus, K, R, H
+    pos = 0.0
+    pos += 1.0 / (1.0 + 10.0 ** (ph - PKA["Nterm"]))
+    pos += nK * (1.0 / (1.0 + 10.0 ** (ph - PKA["K"])))
+    pos += nR * (1.0 / (1.0 + 10.0 ** (ph - PKA["R"])))
+    pos += nH * (1.0 / (1.0 + 10.0 ** (ph - PKA["H"])))
+
+    # negative groups: C-terminus, D, E, C, Y
+    neg = 0.0
+    neg += 1.0 / (1.0 + 10.0 ** (PKA["Cterm"] - ph))
+    neg += nD * (1.0 / (1.0 + 10.0 ** (PKA["D"] - ph)))
+    neg += nE * (1.0 / (1.0 + 10.0 ** (PKA["E"] - ph)))
+    neg += nC * (1.0 / (1.0 + 10.0 ** (PKA["C"] - ph)))
+    neg += nY * (1.0 / (1.0 + 10.0 ** (PKA["Y"] - ph)))
+
+    return float(pos - neg)
+
+
+def estimate_pi(seq: str, ph_low: float = 0.0, ph_high: float = 14.0, steps: int = 60) -> float:
+    """
+    Find pH where net charge crosses 0 using simple bisection.
+    """
+    s = seq.strip().upper()
+    if not s:
+        return float("nan")
+
+    lo, hi = ph_low, ph_high
+    clo = net_charge_at_ph(s, lo)
+    chi = net_charge_at_ph(s, hi)
+
+    # If no sign change (rare with rough pKa), fallback to scanning minimum abs charge
+    if clo * chi > 0:
+        grid = np.linspace(lo, hi, steps)
+        charges = np.array([net_charge_at_ph(s, p) for p in grid])
+        return float(grid[np.argmin(np.abs(charges))])
+
+    for _ in range(30):
+        mid = 0.5 * (lo + hi)
+        cmid = net_charge_at_ph(s, mid)
+        if clo * cmid <= 0:
+            hi, chi = mid, cmid
+        else:
+            lo, clo = mid, cmid
+    return float(0.5 * (lo + hi))
 
 @dataclass
 class RiskConfig:
@@ -152,6 +241,10 @@ def sequence_features(seq: str) -> Dict[str, float]:
 
     mw_kda = estimate_mw_kda(s)
 
+    pi = estimate_pi(s)
+    gravy_score = gravy(s)
+    charge74 = net_charge_at_ph(s, 7.4)
+
     return {
         "length": float(L),
         "mw_kda": float(mw_kda),
@@ -167,6 +260,9 @@ def sequence_features(seq: str) -> Dict[str, float]:
         "oxid_rate": float(oxid_rate),
         "clip_rate": float(clip_rate),
         "low_complex_rate": float(low_complex_rate),
+        "pi": float(pi),
+        "gravy": float(gravy_score),
+        "charge_7p4": float(charge74),        
     }
 
 

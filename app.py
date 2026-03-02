@@ -60,6 +60,22 @@ with st.sidebar:
     st.divider()
 
     cfg = RiskConfig()
+    st.markdown("### Parameters")
+    st.caption("Thresholds")
+    overall_threshold = st.slider(
+        "Overall threshold (reject ≥)",
+        0.0, 100.0, float(cfg.overall_review_threshold), 1.0,
+        help="Candidates with overall risk score ≥ this value are filtered out. Recommended default: 70."
+    )
+    effort_threshold = st.slider(
+        "Effort threshold (reject >)",
+        10.0, 1500.0, float(cfg.effort_accept_threshold), 5.0,
+        help="Candidates requiring wet-lab effort index > this value are filtered out. Recommended default: 100."
+    )
+
+    st.caption("Weights")
+
+    
 
     c1, c2 = st.columns(2)
     with c1:
@@ -85,17 +101,6 @@ with st.sidebar:
             help="If enabled, weights are normalized to sum to 1."
         )
 
-    st.caption("Thresholds")
-    overall_threshold = st.slider(
-        "Overall threshold (reject ≥)",
-        0.0, 100.0, float(cfg.overall_review_threshold), 1.0,
-        help="Candidates with overall risk score ≥ this value are filtered out. Recommended default: 70."
-    )
-    effort_threshold = st.slider(
-        "Effort threshold (reject >)",
-        10.0, 1500.0, float(cfg.effort_accept_threshold), 5.0,
-        help="Candidates requiring wet-lab effort index > this value are filtered out. Recommended default: 100."
-    )
 
     st.caption("Flags")
     cfg.critical_subrisk_threshold = st.slider(
@@ -184,33 +189,140 @@ def color_for_point(status: str, overall: float, accept_split: float = 45.0) -> 
 def symbol_for_point(status: str) -> str:
     return "x" if status in ("Reject", "Critical") else "circle"
 
-def plot_mw_distribution_sidebar(mw_kda: np.ndarray, bins: int = 14):
-    mw = mw_kda[~np.isnan(mw_kda)]
-    fig = plt.figure(figsize=(4.8, 2.6))
-    ax = plt.gca()
+def _kde_density(x_grid: np.ndarray, samples: np.ndarray) -> np.ndarray:
+    """
+    Return KDE density evaluated on x_grid.
+    Tries scipy.stats.gaussian_kde first; falls back to a numpy KDE if scipy is unavailable.
+    """
+    samples = np.asarray(samples, dtype=float)
+    samples = samples[~np.isnan(samples)]
+    n = samples.size
+    if n < 2:
+        # almost-degenerate -> spike-ish
+        return np.zeros_like(x_grid)
 
-    if len(mw) < 5:
-        ax.text(0.1, 0.5, "MW distribution not available", fontsize=10)
+    # 1) scipy KDE if available
+    try:
+        from scipy.stats import gaussian_kde  # type: ignore
+        kde = gaussian_kde(samples)  # Scott's rule by default
+        return kde(x_grid)
+    except Exception:
+        pass
+
+    # 2) numpy fallback KDE (Gaussian kernel, Silverman's rule)
+    # Silverman bandwidth: h = 1.06 * std * n^(-1/5)
+    std = np.std(samples, ddof=1)
+    if not np.isfinite(std) or std <= 1e-12:
+        # all samples ~ identical
+        return np.zeros_like(x_grid)
+
+    h = 1.06 * std * (n ** (-1.0 / 5.0))
+    h = max(h, 1e-6)
+
+    # Gaussian KDE: 1/(n*h) * sum phi((x - xi)/h)
+    # vectorized: (m x n)
+    z = (x_grid[:, None] - samples[None, :]) / h
+    dens = np.exp(-0.5 * z * z) / np.sqrt(2.0 * np.pi)
+    return np.mean(dens, axis=1) / h
+
+
+def _single_distribution_kde(
+    ax,
+    data,
+    title: str,
+    xlabel: str,
+    bins: int = 16,
+):
+    data_all = np.asarray(data, dtype=float)
+    data_clean = data_all[~np.isnan(data_all)]
+
+    if len(data_clean) < 5:
+        ax.text(0.05, 0.55, "Not enough data", fontsize=9, transform=ax.transAxes)
         ax.axis("off")
-        return fig
+        return
 
-    mu = float(np.mean(mw))
-    sigma = float(np.std(mw, ddof=1)) if len(mw) > 1 else 1.0
+    mu = float(np.mean(data_clean))
+    sigma = float(np.std(data_clean, ddof=1)) if len(data_clean) > 1 else 0.0
+    med = float(np.median(data_clean))
+    mn = float(np.min(data_clean))
+    mx = float(np.max(data_clean))
+    missing_pct = 100.0 * (1.0 - len(data_clean) / max(len(data_all), 1))
 
-    counts, bin_edges, _ = ax.hist(mw, bins=bins, alpha=0.9)
-    ax.set_xlabel("MW (kDa)", fontsize=9)
-    ax.set_ylabel("Count", fontsize=9)
-    ax.set_title("MW distribution", fontsize=10)
+    # --- outline histogram (no fill) ---
+    counts, bin_edges, _ = ax.hist(
+        data_clean,
+        bins=bins,
+        histtype="step",
+        linewidth=1.6,
+        alpha=0.95,
+    )
 
-    # fitted normal curve (scaled to histogram)
-    x = np.linspace(bin_edges[0], bin_edges[-1], 250)
-    bin_w = bin_edges[1] - bin_edges[0]
-    pdf = (1.0 / (sigma * np.sqrt(2*np.pi))) * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
-    y = pdf * len(mw) * bin_w
-    ax.plot(x, y, linewidth=2)
+    # --- KDE curve, scaled to histogram counts ---
+    left, right = float(bin_edges[0]), float(bin_edges[-1])
+    if right <= left:
+        right = left + 1.0
 
-    ax.axvline(mu, linestyle="--", linewidth=1)
-    ax.tick_params(axis="both", labelsize=8)
+    x_grid = np.linspace(left, right, 300)
+    bin_w = float(bin_edges[1] - bin_edges[0]) if len(bin_edges) > 1 else (right - left) / max(bins, 1)
+
+    dens = _kde_density(x_grid, data_clean)  # integrates to ~1
+    y = dens * len(data_clean) * bin_w       # scale to histogram "Count"
+    ax.plot(x_grid, y, linewidth=3.2)        # thicker KDE
+
+    # mean line
+    ax.axvline(mu, linestyle="--", linewidth=1.2)
+
+    # labels
+    ax.set_title("")
+
+    ax.text(
+        0.02, 0.98, title,
+        transform=ax.transAxes,
+        ha="left", va="top",
+        color="white",
+        fontsize=16,
+        fontweight="bold",
+        bbox=dict(
+            boxstyle="round,pad=0.25",
+            facecolor="black",
+            alpha=0.35,
+            edgecolor="none",
+        ),
+        zorder=10,
+    )    
+    ax.set_xlabel(xlabel, fontsize=12)
+    ax.set_ylabel("Count", fontsize=12)
+    ax.tick_params(axis="both", labelsize=10)
+
+
+
+def plot_protein_overview_sidebar_kde(
+    mw,
+    pi,
+    gravy,
+    charge,
+    bins: int = 14,
+    *,
+    figsize=(4.8, 8.5),
+    transparent_background: bool = True,
+):
+    fig, axes = plt.subplots(
+        4, 1,
+        figsize=figsize,
+        constrained_layout=True
+    )
+
+    # transparent background for Streamlit themes
+    if transparent_background:
+        fig.patch.set_alpha(0.0)
+        for ax in axes:
+            ax.set_facecolor("none")
+
+    _single_distribution_kde(axes[0], mw,    "MW distribution",    "MW (kDa)",            bins=bins)
+    _single_distribution_kde(axes[1], pi,    "pI distribution",    "Isoelectric point",   bins=bins)
+    _single_distribution_kde(axes[2], gravy, "GRAVY distribution", "GRAVY",               bins=bins)
+    _single_distribution_kde(axes[3], charge,"Charge distribution","Net charge @ pH 7.4", bins=bins)
+
     return fig
 
 
@@ -260,11 +372,19 @@ with st.sidebar:
         r1.metric("N", int(stats["n"]))
         r2.metric("Effort med.", f"{stats['effort_median']:.1f}")
 
-        r3, r4 = st.columns(2)
-        r3.metric("MW mean", f"{stats['mw_kda_mean']:.2f}")
-        r4.metric("MW med.", f"{stats['mw_kda_median']:.2f}")
+        pi_median = float(np.nanmedian(X["pi"].values))
 
-        fig = plot_mw_distribution_sidebar(stats["dist_mw_kda"], bins=14)
+        r3, r4 = st.columns(2)
+        r3.metric("MW med.", f"{stats['mw_kda_median']:.2f}")
+        r4.metric("pI med.", f"{pi_median:.2f}")
+
+        
+
+        pi_array = X["pi"].values.astype(float)
+        gravy_array = X["gravy"].values.astype(float)
+        charge_array = X["charge_7p4"].values.astype(float)
+
+        fig = plot_protein_overview_sidebar_kde(stats["dist_mw_kda"], pi_array, gravy_array, charge_array, bins=16)
         st.pyplot(fig, use_container_width=True)
 
         st.caption("Reference only. Core decision is driven by risk axes + effort gating.")
